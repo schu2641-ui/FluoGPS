@@ -14,7 +14,7 @@ class SANGraphHead(nn.Module):
         L (int): Number of hidden layers.
     """
 
-    def __init__(self, dim_in, dim_out, L=3):
+    def __init__(self, dim_in, dim_out, L=2):
         super().__init__()
         self.pooling_fun = global_mean_pool
         list_FC_layers = [

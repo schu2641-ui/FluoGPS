@@ -89,6 +89,10 @@ class GPSLayer(nn.Module):
                 # GatedGCN does residual connection and dropout internally.
             h_local = local_out.x
             batch.edge_attr = local_out.edge_attr
+            if self.layer_norm:
+                h_local = self.norm1_local(h_local, batch.batch)
+            if self.batch_norm:
+                h_local = self.norm1_local(h_local)
             h_out_list.append(h_local)
 
         # Multi-head attention.

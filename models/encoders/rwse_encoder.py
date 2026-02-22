@@ -9,12 +9,12 @@ NORM_TYPE = 'batchnorm'  # 'mlp' or 'linear'
 class RWSEEncoder(torch.nn.Module):
 
       # Instantiated type of the KernelPE, e.g. RWSE
-    def __init__(self, dim_in, dim_emb, pass_as_var=True, expand_x=True,
-                 rwse_steps=None):
+    def __init__(self, dim_in, dim_emb, pass_as_var=True, expand_x=False,
+                 rwse_steps=None, dim_pe=None):
         super().__init__()
         self.kernel_type = KERNEL
-        num_rw_steps = len(rwse_steps)  # Number of random walk steps used
-        self.dim_pe = DIM_PE
+        num_rw_steps = len(rwse_steps) if rwse_steps is not None else 16  # Number of random walk steps used
+        self.dim_pe = dim_pe if dim_pe is not None else DIM_PE
         self.n_layers = N_LAYERS
         model_type = MODEL_TYPE.lower()  # Encoder NN model type for PEs
         norm_type = NORM_TYPE.lower()  # Raw PE normalization layer type
