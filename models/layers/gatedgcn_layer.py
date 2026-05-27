@@ -17,7 +17,11 @@ class GatedGCNLayer(pyg_nn.conv.MessagePassing):
     def __init__(self, in_dim, out_dim, dropout, residual, act='relu',
                  equivstable_pe=False, **kwargs):
         super().__init__(**kwargs)
-        self.activation = register.act_dict[act]
+        self.activation = register.act_dict.get(act)
+        if self.activation is None:
+            if act != "relu":
+                raise KeyError(f"Unknown activation: {act}")
+            self.activation = nn.ReLU
         self.A = pyg_nn.Linear(in_dim, out_dim, bias=True)
         self.B = pyg_nn.Linear(in_dim, out_dim, bias=True)
         self.C = pyg_nn.Linear(in_dim, out_dim, bias=True)

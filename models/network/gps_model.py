@@ -19,12 +19,17 @@ class FeatureEncoder(torch.nn.Module):
         super(FeatureEncoder, self).__init__()
         # RWSE takes 20 dimensions, so AtomEncoder gets the rest
         dim_pe = 20  # RWSE dimension
-        atom_dim_out = dim_emb - dim_pe  # AtomEncoder output dimension
+        role_dim_out = 8 # RoleEncoder output dimension (assuming 2 roles)
+        self.role_encoder = torch.nn.Embedding(2, role_dim_out)  # Assuming 2 roles: 0 and 1
+        atom_dim_out = dim_emb - dim_pe - role_dim_out  # AtomEncoder output dimension
         # Encode integer node features via nn.Embeddings (Long -> Float)
         self.atom_encoder = AtomEncoder(atom_dim_out)
+        # Encode role features via nn.Embeddings (Long -> Float)
         # Add RWSE positional encoding (expand_x=False since x is already encoded)
-        self.rwse_encoder = RWSEEncoder(dim_in=atom_dim_out, dim_emb=dim_emb,
-                                         rwse_steps=rwse_steps, expand_x=False)
+        self.rwse_encoder = RWSEEncoder(dim_in=atom_dim_out + role_dim_out, 
+                                        dim_emb=dim_emb,
+                                        rwse_steps=rwse_steps, 
+                                        expand_x=False)
         # Encode integer edge features via nn.Embeddings
         self.edge_encoder = BondEncoder(dim_emb)
 
@@ -32,6 +37,8 @@ class FeatureEncoder(torch.nn.Module):
         # First encode atom features (Long -> Float)
         batch = self.atom_encoder(batch)
         # Then add RWSE positional encoding
+        role_emb = self.role_encoder(batch.role)  # Encode role features
+        batch.x = torch.cat([batch.x, role_emb], dim=-1)  #
         batch = self.rwse_encoder(batch)
         # Finally encode edge features
         batch = self.edge_encoder(batch)

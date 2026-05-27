@@ -1,144 +1,108 @@
-# Clean GPS - 荧光分子预测项目 (精简版)
+# FluoGPS
 
-## 📖 项目简介
+FluoGPS 是一个面向荧光分子性质预测的研究仓库，核心模型基于 GraphGPS 思路，当前整理为“源码层 + 脚本入口 + 实验材料 + 本地产物”四层结构。
 
-从 GraphGPS 项目中提取核心代码，构建一个简洁的图神经网络训练框架，专注于荧光分子物理特性预测。
+## 目录
 
-**目标**: 移除 GraphGym 依赖，理解深度学习训练的核心流程。
-
----
-
-## 🗂️ 项目结构
-
-```
-clean_gps/
-├── ASSEMBLY_GUIDE.md      # 📚 组装指南 - 从这里开始！
-├── README.md              # 本文件
-├── configs/
-│   └── config.py          # 训练配置参数
-├── data/                  # 数据加载模块
-├── models/                # 模型定义
-│   ├── encoders/          # 特征编码器
-│   ├── layers/            # 核心层 (GPS Layer)
-│   └── heads/             # 预测头
-├── utils/                 # 工具函数
-└── scripts/               # 训练脚本
-    ├── check_assembly.py  # 🔍 组装检查脚本
-    └── train.py           # 训练入口 (待创建)
+```text
+FluoGPS/
+├── data/              # 数据集定义与图构建
+├── models/            # 模型主体
+├── train/             # 训练循环
+├── utils/             # 调度、日志、推理公共函数
+├── scripts/           # CLI 入口
+├── experiments/       # 按论文图序组织的实验、绘图、渲染脚本
+├── notebooks/         # 探索性 notebook
+├── docs/              # 说明文档与归档
+├── examples/inputs/   # 可跟踪的样例输入
+├── datasets/          # 原始数据与 PyG 缓存根目录
+├── checkpoints/       # 本地模型权重，默认不进 Git
+└── outputs/           # 训练结果、预测结果、图像产物，默认不进 Git
 ```
 
----
+## CLI 入口
 
-## 🚀 快速开始
+统一通过 `python -m ...` 运行。
 
-### 第一步：阅读组装指南
-
-打开 `ASSEMBLY_GUIDE.md`，了解需要从 GraphGPS 复制哪些文件。
-
-### 第二步：开始组装
-
-按以下顺序完成：
-
-1. **数据模块** (`data/`)
-   - 复制 `fluorescence.py` → `data/dataset.py`
-   - 创建 `data/loader.py`
-
-   **检查**: `python scripts/check_assembly.py` (检查1-2)
-
-2. **编码器** (`models/encoders/`)
-   - 复制 `atom_encoder.py` → `node_encoder.py`
-   - 复制 `bond_encoder.py` → `edge_encoder.py`
-   - 复制 `rwse_encoder.py` → `pos_encoder.py`
-
-   **检查**: `python scripts/check_assembly.py` (检查3)
-
-3. **GPS 层** (`models/layers/`)
-   - 复制 `gps_layer.py` → `models/layers/gps_layer.py`
-   - **重要**: 移除 `cfg` 依赖
-
-   **检查**: `python scripts/check_assembly.py` (检查4)
-
-4. **完整模型** (`models/`)
-   - 复制 `gps_model.py` → `models/gps_model.py`
-   - **重要**: 移除 `register_network` 和 `cfg` 依赖
-
-   **检查**: `python scripts/check_assembly.py` (检查5)
-
-5. **训练器** (`utils/`)
-   - 参考 `custom_train.py` 创建 `utils/trainer.py`
-   - 创建 `scripts/train.py`
-
-   **检查**: `python scripts/check_assembly.py` (检查6)
-
----
-
-## 🔧 关键修改点
-
-### ❌ 原始代码 (GraphGym 依赖)
-
-```python
-from torch_geometric.graphgym.config import cfg
-
-class GPSModel(nn.Module):
-    def __init__(self, dim_in, dim_out):
-        dim_h = cfg.gt.dim_hidden
-        # ...
-```
-
-### ✅ 修改后 (无依赖)
-
-```python
-class GPSModel(nn.Module):
-    def __init__(self, dim_in, dim_out, dim_hidden=76, num_layers=4):
-        dim_h = dim_hidden
-        # ...
-```
-
----
-
-## 📝 使用方法
-
-### 训练模型
+训练：
 
 ```bash
-cd /data/young/text2/clean_gps
-python scripts/train.py
+python -m scripts.train
 ```
 
-### 检查组装进度
+单任务预测：
 
 ```bash
-python scripts/check_assembly.py
+python -m scripts.predict \
+  --input_csv examples/inputs/data.csv \
+  --checkpoint checkpoints/abs.pt
 ```
 
----
+批量 `tztz` 预测：
 
-## 💡 学习要点
+```bash
+python -m scripts.predict_tztz
+```
 
-通过这个项目，你将学会：
+消融实验：
 
-1. ✅ 如何设计图数据集类
-2. ✅ 如何构建图神经网络模型
-3. ✅ 如何实现训练循环
-4. ✅ 如何处理分子数据 (SMILES → 图)
-5. ✅ 如何进行数据归一化和反归一化
+```bash
+python -m scripts.run_ablation --experiments baseline norwse
+```
 
----
+## 默认输入输出
 
-## 🆘 遇到问题？
+- 样例输入放在 `examples/inputs/`
+- 训练日志和测试预测放在 `outputs/runs/`
+- 预测结果放在 `outputs/predictions/`
+- 绘图和渲染结果放在 `outputs/figures/`
+- 发布型或手工维护的模型权重放在 `checkpoints/`
 
-1. 查看 `ASSEMBLY_GUIDE.md` 中的详细说明
-2. 运行 `python scripts/check_assembly.py` 定位问题
-3. 查看错误信息的 stack trace
-4. 随时问我！
+## 实验脚本
 
----
+`experiments/` 已按 manuscript 中 Fig. 1 到 Fig. 5 的顺序整理：
 
-## 📊 项目进度
+```text
+experiments/
+├── fig01_model_overview/
+├── fig02_prediction_benchmark/
+├── fig03_ablation/
+├── fig04_abs_explainability/
+└── fig05_fluoinvent_tztz_design/
+```
 
-- [ ] 1. 数据加载模块
-- [ ] 2. 编码器模块
-- [ ] 3. GPS 层
-- [ ] 4. 完整模型
-- [ ] 5. 训练器
-- [ ] 6. 训练脚本
+每个目录内有独立 `README.md`，记录该图对应的实验目的、默认输入输出和运行命令。统一从仓库根目录运行，例如：
+
+```bash
+/home/panshangyang/ENTER/envs/graphgps/bin/python -m experiments.fig02_prediction_benchmark.plot_plqy_scatter
+```
+
+## 依赖说明
+
+核心训练与预测依赖：
+
+- `torch`
+- `torch_geometric`
+- `ogb`
+- `pandas`
+- `numpy`
+- `scikit-learn`
+
+实验可视化与渲染额外依赖：
+
+- `matplotlib`
+- `tensorboard`
+- `rdkit`
+- `Pillow`
+
+## 仓库约定
+
+- `scripts/` 只放入口和参数解析
+- 训练逻辑留在 `train/`
+- 数据图构造留在 `data/`
+- 推理公共逻辑集中在 `utils/inference.py`
+- `outputs/` 和 `checkpoints/` 视为本地工作目录，默认不纳入 Git
+
+## 归档
+
+根目录旧版说明文档已经移出主工作区。历史背景说明见 [legacy_notes.md](/data/panshangyang/FluoGPS/docs/archive/legacy_notes.md)。

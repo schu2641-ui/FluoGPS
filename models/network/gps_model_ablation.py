@@ -1,217 +1,148 @@
 """
-支持消融实验的GPS模型
+GPSModelAblation: 用于消融实验的 GPS 模型变体。
+
+通过传入 AblationConfig 字典动态控制各组件的开启/关闭：
+    - use_rwse   : 是否使用 RWSE 位置编码
+    - rwse_steps : RWSE 随机游走步数列表
+    - use_local  : GPS 层是否使用局部 MPNN (GatedGCN)
+    - use_global : GPS 层是否使用全局 Attention (Transformer)
+
+示例：
+    cfg = AblationConfig(use_rwse=False, rwse_steps=list(range(1,17)),
+                         use_local=True, use_global=True)
+    model = GPSModelAblation(dim_h=128, ablation_cfg=cfg)
 """
+
 import torch
+import torch.nn as nn
+from typing import TypedDict, List
+
 from torch_geometric.graphgym.models.encoder import BondEncoder, AtomEncoder
-from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
 
 from models.layers.GPS_layer import GPSLayer
 from models.encoders.rwse_encoder import RWSEEncoder
 from models.heads.san_graph import SANGraphHead
-from ablation_config import AblationConfig
 
 
-class FeatureEncoder(torch.nn.Module):
-    """特征编码器，支持消融"""
-    
-    def __init__(self, dim_emb, config: AblationConfig):
-        super(FeatureEncoder, self).__init__()
-        self.config = config
-        
-        # 计算各部分维度
-        if config.use_rwse:
-            dim_pe = config.rwse_dim_pe
-            atom_dim_out = dim_emb - dim_pe
-        else:
-            atom_dim_out = dim_emb
-            
-        # 原子编码器
-        if config.use_atom_encoder:
-            self.atom_encoder = AtomEncoder(atom_dim_out)
-        else:
-            self.atom_encoder = None
-            
-        # RWSE位置编码
-        if config.use_rwse:
-            self.rwse_encoder = RWSEEncoder(
-                dim_in=atom_dim_out,
-                dim_emb=dim_emb,
-                rwse_steps=config.rwse_steps,
-                expand_x=config.use_atom_encoder,
-                dim_pe=config.rwse_dim_pe
-            )
-        else:
-            self.rwse_encoder = None
-            
-        # 边编码器
-        if config.use_edge_encoder:
-            self.edge_encoder = BondEncoder(dim_emb)
-        else:
-            self.edge_encoder = None
-            
-    def forward(self, batch):
-        # 原子特征编码
-        if self.atom_encoder is not None:
-            batch = self.atom_encoder(batch)
-            
-        # RWSE位置编码
-        if self.rwse_encoder is not None:
-            batch = self.rwse_encoder(batch)
-            
-        # 边特征编码
-        if self.edge_encoder is not None:
-            batch = self.edge_encoder(batch)
-            
-        return batch
+class AblationConfig(TypedDict):
+    use_rwse: bool       # 是否启用 RWSE 位置编码
+    rwse_steps: List     # 随机游走步数列表，用于 create_loader 和 RWSEEncoder
+    use_local: bool      # GPS 层是否启用局部 MPNN
+    use_global: bool     # GPS 层是否启用全局 Attention
 
 
-class GPSLayerAblation(torch.nn.Module):
-    """支持消融的GPS层"""
-    
-    def __init__(self, dim_h, config: AblationConfig):
+class FeatureEncoderAblation(nn.Module):
+    """
+    消融版 FeatureEncoder。
+
+    use_rwse=True  → AtomEncoder(dim_h - 20 - role_dim) + RoleEmbedding(role_dim) + RWSEEncoder(20) → 输出 dim_h
+    use_rwse=False → AtomEncoder(dim_h - role_dim) + RoleEmbedding(role_dim)                         → 输出 dim_h
+    """
+
+    def __init__(self, dim_emb: int, use_rwse: bool = True, rwse_steps=None):
         super().__init__()
-        self.config = config
-        
-        # Local MPNN
-        if config.use_local_gnn:
-            from models.layers.gatedgcn_layer import GatedGCNLayer
-            self.local_model = GatedGCNLayer(
-                dim_h, dim_h,
-                dropout=config.dropout,
-                residual=True,
-                act='relu'
+        self.use_rwse = use_rwse
+        role_dim_out = 8
+        self.role_encoder = torch.nn.Embedding(2, role_dim_out)
+
+        if use_rwse:
+            dim_pe = 20
+            atom_dim_out = dim_emb - dim_pe - role_dim_out
+            if atom_dim_out <= 0:
+                raise ValueError(
+                    f"dim_emb={dim_emb} is too small for dim_pe={dim_pe} "
+                    f"and role_dim={role_dim_out}."
+                )
+            self.atom_encoder = AtomEncoder(atom_dim_out)
+            self.rwse_encoder = RWSEEncoder(
+                dim_in=atom_dim_out + role_dim_out,
+                dim_emb=dim_emb,
+                rwse_steps=rwse_steps,
+                expand_x=False,
             )
         else:
-            self.local_model = None
-            
-        # Global Attention
-        if config.use_global_attn:
-            self.self_attn = torch.nn.MultiheadAttention(
-                dim_h, config.num_heads,
-                dropout=config.attn_dropout,
-                batch_first=True
-            )
-        else:
-            self.self_attn = None
-            
-        # Normalization
-        self.norm1_local = torch.nn.BatchNorm1d(dim_h)
-        self.norm1_attn = torch.nn.BatchNorm1d(dim_h)
-        self.dropout_local = torch.nn.Dropout(config.dropout)
-        self.dropout_attn = torch.nn.Dropout(config.dropout)
-        
-        # Feed Forward
-        self.ff_linear1 = torch.nn.Linear(dim_h, dim_h * 2)
-        self.ff_linear2 = torch.nn.Linear(dim_h * 2, dim_h)
-        self.act_fn_ff = torch.nn.ReLU()
-        self.norm2 = torch.nn.BatchNorm1d(dim_h)
-        self.ff_dropout1 = torch.nn.Dropout(config.dropout)
-        self.ff_dropout2 = torch.nn.Dropout(config.dropout)
-        
+            # 不使用 RWSE，AtomEncoder + role embedding 共同输出 dim_emb 维度
+            atom_dim_out = dim_emb - role_dim_out
+            if atom_dim_out <= 0:
+                raise ValueError(
+                    f"dim_emb={dim_emb} is too small for role_dim={role_dim_out}."
+                )
+            self.atom_encoder = AtomEncoder(atom_dim_out)
+
+        self.edge_encoder = BondEncoder(dim_emb)
+
     def forward(self, batch):
-        from torch_geometric.utils import to_dense_batch
-        
-        h = batch.x
-        h_in1 = h
-        
-        h_out_list = []
-        
-        # Local MPNN
-        if self.local_model is not None:
-            from torch_geometric.data import Batch
-            local_out = self.local_model(Batch(
-                batch=batch,
-                x=h,
-                edge_index=batch.edge_index,
-                edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None
-            ))
-            h_local = local_out.x
-            h_local = self.norm1_local(h_local)
-            h_out_list.append(h_local)
-            
-        # Global Attention
-        if self.self_attn is not None:
-            h_dense, mask = to_dense_batch(h, batch.batch)
-            h_attn = self.self_attn(h_dense, h_dense, h_dense,
-                                    key_padding_mask=~mask)[0][mask]
-            h_attn = self.dropout_attn(h_attn)
-            h_attn = h_in1 + h_attn
-            h_attn = self.norm1_attn(h_attn)
-            h_out_list.append(h_attn)
-            
-        # Combine
-        if len(h_out_list) > 0:
-            if self.config.local_global_combine == "sum":
-                h = sum(h_out_list)
-            elif self.config.local_global_combine == "weighted":
-                # 分别加权
-                weighted_sum = 0
-                if self.local_model is not None:
-                    weighted_sum += h_out_list[0] * self.config.local_weight
-                if self.self_attn is not None:
-                    idx = 1 if self.local_model is not None else 0
-                    weighted_sum += h_out_list[idx] * self.config.global_weight
-                h = weighted_sum
-        else:
-            h = h_in1
-            
-        # Feed Forward
-        h = h + self._ff_block(h)
-        h = self.norm2(h)
-        
-        batch.x = h
+        batch = self.atom_encoder(batch)
+        role_emb = self.role_encoder(batch.role)
+        batch.x = torch.cat([batch.x, role_emb], dim=-1)
+        if self.use_rwse:
+            batch = self.rwse_encoder(batch)
+        batch = self.edge_encoder(batch)
         return batch
-        
-    def _ff_block(self, x):
-        x = self.ff_dropout1(self.act_fn_ff(self.ff_linear1(x)))
-        return self.ff_dropout2(self.ff_linear2(x))
 
 
 class GPSModelAblation(torch.nn.Module):
-    """支持消融实验的GPS模型"""
-    
-    def __init__(self, config: AblationConfig):
+    """
+    消融实验版 GPS 模型。
+
+    相比 GPSModel，额外接受一个 ablation_cfg 参数来控制各组件开关。
+    其余超参数（dim_h, num_heads, dropout 等）与 GPSModel 保持一致。
+    """
+
+    def __init__(
+        self,
+        dim_h: int,
+        num_heads: int = 4,
+        dropout: float = 0.05,
+        attn_dropout: float = 0.05,
+        num_layers: int = 10,
+        dim_out: int = 1,
+        ablation_cfg: AblationConfig = None,
+    ):
         super().__init__()
-        self.config = config
-        dim_h = config.dim_hidden
-        
-        # 特征编码器
-        self.encoder = FeatureEncoder(dim_h, config)
-        
-        # GPS层
-        layers = []
-        for _ in range(config.num_layers):
-            layers.append(GPSLayerAblation(dim_h, config))
-        self.layers = torch.nn.Sequential(*layers)
-        
-        # 预测头
-        self.pooling = self._get_pooling(config.pooling_type)
-        self.post_mp = SANGraphHead(
-            dim_in=dim_h,
-            dim_out=1,
-            L=config.head_layers
+
+        # 默认配置等价于完整模型（baseline）
+        if ablation_cfg is None:
+            ablation_cfg = AblationConfig(
+                use_rwse=True,
+                rwse_steps=list(range(1, 17)),
+                use_local=True,
+                use_global=True,
+            )
+
+        self.ablation_cfg = ablation_cfg
+
+        # ---- 编码器 ----
+        self.encoder = FeatureEncoderAblation(
+            dim_emb=dim_h,
+            use_rwse=ablation_cfg["use_rwse"],
+            rwse_steps=ablation_cfg["rwse_steps"],
         )
-        
-    def _get_pooling(self, pooling_type):
-        pooling_dict = {
-            "mean": global_mean_pool,
-            "max": global_max_pool,
-            "add": global_add_pool
-        }
-        return pooling_dict.get(pooling_type, global_mean_pool)
-        
+
+        # ---- GPS 层栈 ----
+        layers = []
+        for _ in range(num_layers):
+            layers.append(
+                GPSLayer(
+                    dim_h,
+                    num_heads=num_heads,
+                    act="relu",
+                    equivstable_pe=False,
+                    dropout=dropout,
+                    attn_dropout=attn_dropout,
+                    layer_norm=False,
+                    batch_norm=True,
+                    log_attn_weights=False,
+                    use_local=ablation_cfg["use_local"],
+                    use_global=ablation_cfg["use_global"],
+                )
+            )
+        self.layers = torch.nn.Sequential(*layers)
+
+        # ---- 预测头 ----
+        self.post_mp = SANGraphHead(dim_in=dim_h, dim_out=dim_out)
+
     def forward(self, batch):
-        # 编码
-        batch = self.encoder(batch)
-        
-        # GPS层
-        for layer in self.layers:
-            batch = layer(batch)
-            
-        # 池化
-        graph_emb = self.pooling(batch.x, batch.batch)
-        batch.graph_feature = graph_emb
-        
-        # 预测
-        pred, label = self.post_mp(batch)
-        return pred, label
+        for module in self.children():
+            batch = module(batch)
+        return batch

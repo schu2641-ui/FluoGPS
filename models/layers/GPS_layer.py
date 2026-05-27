@@ -15,12 +15,14 @@ class GPSLayer(nn.Module):
     def __init__(self, dim_h,
                 num_heads,
                 act='relu',
-                equivstable_pe=False, 
+                equivstable_pe=False,
                 dropout=0.0,
-                attn_dropout=0.0, 
-                layer_norm=False, 
+                attn_dropout=0.0,
+                layer_norm=False,
                 batch_norm=True,
-                log_attn_weights=False):
+                log_attn_weights=False,
+                use_local=True,
+                use_global=True):
         super().__init__()
 
         self.dim_h = dim_h
@@ -30,6 +32,8 @@ class GPSLayer(nn.Module):
         self.batch_norm = batch_norm
         self.equivstable_pe = equivstable_pe
         self.activation = nn.ReLU
+        self.use_local = use_local
+        self.use_global = use_global
 
         self.log_attn_weights = log_attn_weights
 
@@ -76,7 +80,7 @@ class GPSLayer(nn.Module):
 
         h_out_list = []
         # Local MPNN with edge attributes.
-        if self.local_model is not None:
+        if self.local_model is not None and self.use_local:
             self.local_model: pygnn.conv.MessagePassing  # Typing hint.
             es_data = None
             if self.equivstable_pe:
@@ -96,7 +100,7 @@ class GPSLayer(nn.Module):
             h_out_list.append(h_local)
 
         # Multi-head attention.
-        if self.self_attn is not None:
+        if self.self_attn is not None and self.use_global:
             h_dense, mask = to_dense_batch(h, batch.batch)
             h_attn = self._sa_block(h_dense, None, ~mask)[mask]
             h_attn = self.dropout_attn(h_attn)
@@ -146,4 +150,4 @@ class GPSLayer(nn.Module):
         return self.ff_dropout2(self.ff_linear2(x))
 
     def extra_repr(self):
-        return f'dim_h={self.dim_h}, heads={self.num_heads}, local=GatedGCN, global=Transformer'
+        return f'dim_h={self.dim_h}, heads={self.num_heads}, local=GatedGCN({"on" if self.use_local else "off"}), global=Transformer({"on" if self.use_global else "off"})'
