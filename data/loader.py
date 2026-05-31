@@ -17,6 +17,19 @@ class RWSETransform:
         self.rwse_steps = normalize_kernel(kernel)
 
     def __call__(self, data):
+        if hasattr(data, "solute_edge_index") and hasattr(data, "solvent_edge_index"):
+            data.solute_pestat_RWSE = get_rw_landing_probs(
+                ksteps=self.rwse_steps,
+                edge_index=data.solute_edge_index,
+                num_nodes=data.solute_x.size(0),
+            )
+            data.solvent_pestat_RWSE = get_rw_landing_probs(
+                ksteps=self.rwse_steps,
+                edge_index=data.solvent_edge_index,
+                num_nodes=data.solvent_x.size(0),
+            )
+            return data
+
         data.pestat_RWSE = get_rw_landing_probs(
             ksteps=self.rwse_steps,
             edge_index=data.edge_index,

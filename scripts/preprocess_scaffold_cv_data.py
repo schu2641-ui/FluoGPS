@@ -13,8 +13,21 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 
-from data import FluorescenceDataset, compute_normalization_params
-from data.loader import create_rwse_transform, normalize_kernel
+DEFAULT_RWSE_STEPS = list(range(1, 17))
+
+
+def normalize_kernel(kernel=None):
+    return DEFAULT_RWSE_STEPS.copy() if kernel is None else list(kernel)
+
+
+def load_data_loader_module():
+    module_path = ROOT_DIR / "data" / "loader.py"
+    spec = importlib.util.spec_from_file_location("fluogps_data_loader", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_cv_module():
@@ -32,7 +45,7 @@ CV = load_cv_module()
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Preprocess Murcko scaffold CV CSVs into PyG processed caches."
+        description="Preprocess scaffold CV CSVs into PyG processed caches."
     )
     parser.add_argument(
         "--task",
@@ -42,6 +55,12 @@ def parse_args():
     )
     parser.add_argument("--abs_csv", type=Path, default=CV.TASKS["abs"]["source_csv"])
     parser.add_argument("--emi_csv", type=Path, default=CV.TASKS["emi"]["source_csv"])
+    parser.add_argument(
+        "--split_scheme",
+        choices=["family", "murcko", "both"],
+        default="murcko",
+        help="Scaffold split to preprocess. Use 'both' for family and Murcko folds.",
+    )
     parser.add_argument(
         "--folds",
         type=int,
@@ -61,6 +80,11 @@ def parse_args():
         "--no_solvent",
         action="store_true",
         help="Preprocess caches without solvent graphs.",
+    )
+    parser.add_argument(
+        "--dual_graph",
+        action="store_true",
+        help="Preprocess separate solute and solvent graph caches.",
     )
     parser.add_argument(
         "--force",
@@ -83,10 +107,10 @@ def selected_tasks(args):
     return {task: task_configs[task] for task in tasks}
 
 
-def processed_paths(root, csv_path, kernel, use_solvent):
+def processed_paths(root, csv_path, kernel, use_solvent, dual_graph=False):
     base_name = Path(csv_path).stem
     kernel_suffix = f"_k{len(kernel)}" if kernel is not None else ""
-    solvent_suffix = "" if use_solvent else "_nosolvent"
+    solvent_suffix = "_dual" if dual_graph else "" if use_solvent else "_nosolvent"
     processed_dir = Path(root) / "processed"
     return [
         processed_dir / f"{base_name}{kernel_suffix}{solvent_suffix}_processed.pt",
@@ -94,28 +118,31 @@ def processed_paths(root, csv_path, kernel, use_solvent):
     ]
 
 
-def cache_ready(root, csv_path, kernel, use_solvent):
-    processed_path, norm_path = processed_paths(root, csv_path, kernel, use_solvent)
+def cache_ready(root, csv_path, kernel, use_solvent, dual_graph=False):
+    processed_path, norm_path = processed_paths(root, csv_path, kernel, use_solvent, dual_graph)
     return processed_path.exists() and norm_path.exists()
 
 
-def delete_cache(root, csv_path, kernel, use_solvent):
-    for path in processed_paths(root, csv_path, kernel, use_solvent):
+def delete_cache(root, csv_path, kernel, use_solvent, dual_graph=False):
+    for path in processed_paths(root, csv_path, kernel, use_solvent, dual_graph):
         if path.exists():
             path.unlink()
             print(f"Deleted cache: {path}")
 
 
-def preprocess_dataset(csv_path, root, kernel, pre_transform, y_mean, y_std, use_solvent, force):
-    if force:
-        delete_cache(root, csv_path, kernel, use_solvent)
+def preprocess_dataset(csv_path, root, kernel, pre_transform, y_mean, y_std, use_solvent, dual_graph, force):
+    from data import DualFluorescenceDataset, FluorescenceDataset
 
-    if cache_ready(root, csv_path, kernel, use_solvent):
+    if force:
+        delete_cache(root, csv_path, kernel, use_solvent, dual_graph)
+
+    if cache_ready(root, csv_path, kernel, use_solvent, dual_graph):
         print(f"Cache ready, skip: {csv_path}")
         return
 
     print(f"Preprocessing: {csv_path}")
-    FluorescenceDataset(
+    dataset_cls = DualFluorescenceDataset if dual_graph else FluorescenceDataset
+    dataset_cls(
         csv_file=csv_path,
         root=str(root),
         kernel=kernel,
@@ -125,7 +152,7 @@ def preprocess_dataset(csv_path, root, kernel, pre_transform, y_mean, y_std, use
         use_solvent=use_solvent,
     )
 
-    processed_path, norm_path = processed_paths(root, csv_path, kernel, use_solvent)
+    processed_path, norm_path = processed_paths(root, csv_path, kernel, use_solvent, dual_graph)
     if not processed_path.exists() or not norm_path.exists():
         raise RuntimeError(f"Cache was not created for {csv_path}")
     print(f"Cache saved: {processed_path}")
@@ -136,57 +163,86 @@ def main():
     args.raw_dir = args.raw_dir.resolve()
     root = args.root.resolve() if args.root is not None else args.raw_dir.parent.resolve()
     kernel = normalize_kernel(args.kernel)
-    pre_transform = create_rwse_transform(kernel=kernel)
+    pre_transform = None
+    if not args.status_only:
+        pre_transform = load_data_loader_module().create_rwse_transform(kernel=kernel)
     use_solvent = not args.no_solvent
+    if args.dual_graph and not use_solvent:
+        raise ValueError("--dual_graph requires solvent graphs; remove --no_solvent.")
 
-    for task, config in selected_tasks(args).items():
-        source_csv = Path(config["source_csv"]).resolve()
-        source_target = config["source_target"]
-        target = config["target"]
-        source_df = CV.load_scaffold_table(source_csv, source_target, target)
+    for _, split_config in CV.selected_split_schemes(args).items():
+        split_name = split_config["name"]
+        split_column = split_config["split_column"]
+        scaffold_column = split_config["scaffold_column"]
 
-        for fold in args.folds:
-            train_csv, valid_csv, train_df, valid_df = CV.write_fold_csvs(
-                source_df,
-                task=target,
-                source_csv=source_csv,
-                fold=fold,
-                raw_dir=args.raw_dir,
-            )
-            summary = CV.summarize_split(target, fold, train_df, valid_df, source_df)
-            print(
-                f"\n[{target} fold {fold}] "
-                f"train={summary['train_size']} valid={summary['valid_size']} "
-                f"valid_tags={summary['valid_tag_names']}"
+        for task, config in selected_tasks(args).items():
+            source_csv = Path(config["source_csv"]).resolve()
+            source_target = config["source_target"]
+            target = config["target"]
+            source_df = CV.load_scaffold_table(
+                source_csv,
+                source_target,
+                target,
+                split_column=split_column,
+                scaffold_column=scaffold_column,
             )
 
-            if args.status_only:
-                for split_name, csv_path in [("train", train_csv), ("valid", valid_csv)]:
-                    status = "ready" if cache_ready(root, csv_path, kernel, use_solvent) else "missing"
-                    print(f"{split_name} cache: {status} ({csv_path})")
-                continue
+            for fold in args.folds:
+                train_csv, valid_csv, train_df, valid_df = CV.write_fold_csvs(
+                    source_df,
+                    task=target,
+                    source_csv=source_csv,
+                    fold=fold,
+                    raw_dir=args.raw_dir,
+                    split_scheme=split_name,
+                )
+                summary = CV.summarize_split(
+                    target,
+                    fold,
+                    train_df,
+                    valid_df,
+                    source_df,
+                    split_scheme=split_name,
+                    split_column=split_column,
+                    scaffold_column=scaffold_column,
+                )
+                print(
+                    f"\n[{split_name} {target} fold {fold}] "
+                    f"train={summary['train_size']} valid={summary['valid_size']} "
+                    f"valid_tags={summary['valid_tag_names']}"
+                )
 
-            y_mean, y_std = compute_normalization_params(train_csv)
-            preprocess_dataset(
-                csv_path=train_csv,
-                root=root,
-                kernel=kernel,
-                pre_transform=pre_transform,
-                y_mean=y_mean,
-                y_std=y_std,
-                use_solvent=use_solvent,
-                force=args.force,
-            )
-            preprocess_dataset(
-                csv_path=valid_csv,
-                root=root,
-                kernel=kernel,
-                pre_transform=pre_transform,
-                y_mean=y_mean,
-                y_std=y_std,
-                use_solvent=use_solvent,
-                force=args.force,
-            )
+                if args.status_only:
+                    for dataset_split, csv_path in [("train", train_csv), ("valid", valid_csv)]:
+                        status = "ready" if cache_ready(root, csv_path, kernel, use_solvent, args.dual_graph) else "missing"
+                        print(f"{dataset_split} cache: {status} ({csv_path})")
+                    continue
+
+                from data import compute_normalization_params
+
+                y_mean, y_std = compute_normalization_params(train_csv)
+                preprocess_dataset(
+                    csv_path=train_csv,
+                    root=root,
+                    kernel=kernel,
+                    pre_transform=pre_transform,
+                    y_mean=y_mean,
+                    y_std=y_std,
+                    use_solvent=use_solvent,
+                    dual_graph=args.dual_graph,
+                    force=args.force,
+                )
+                preprocess_dataset(
+                    csv_path=valid_csv,
+                    root=root,
+                    kernel=kernel,
+                    pre_transform=pre_transform,
+                    y_mean=y_mean,
+                    y_std=y_std,
+                    use_solvent=use_solvent,
+                    dual_graph=args.dual_graph,
+                    force=args.force,
+                )
 
     print("\nScaffold CV preprocessing completed.")
 

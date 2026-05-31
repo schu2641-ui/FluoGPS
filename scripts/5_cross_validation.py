@@ -20,7 +20,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 DEFAULT_RAW_DIR = ROOT_DIR / "datasets" / "fluorescence" / "raw"
-DEFAULT_LOG_DIR = ROOT_DIR / "outputs" / "runs" / "scaffold_cv"
+DEFAULT_LOG_DIR = ROOT_DIR / "outputs" / "runs" / "dual_fluogps_scaffold_cv"
+MODEL_NAME = "Dual-FluoGPS"
+USE_DUAL_GRAPH = False
+DEFAULT_DUAL_WEIGHT_MODE = "shared"
 TASKS = {
     "abs": {
         "source_csv": ROOT_DIR / "FluoDB-Lite_abs.csv",
@@ -33,13 +36,23 @@ TASKS = {
         "target": "emi",
     },
 }
-SPLIT_COLUMN = "Murcko_scaffold_fold"
-SCAFFOLD_COLUMN = "Murcko_scaffold"
+SPLIT_SCHEMES = {
+    "family": {
+        "name": "family_scaffold",
+        "split_column": "family_scaffold_fold",
+        "scaffold_column": "tag_name",
+    },
+    "murcko": {
+        "name": "murcko_scaffold",
+        "split_column": "Murcko_scaffold_fold",
+        "scaffold_column": "Murcko_scaffold",
+    },
+}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run Murcko scaffold 5-fold cross validation for FluoGPS."
+        description=f"Run scaffold 5-fold cross validation for {MODEL_NAME}."
     )
     parser.add_argument(
         "--task",
@@ -56,9 +69,27 @@ def parse_args():
         default=[0, 1, 2, 3, 4],
         help="Held-out fold IDs to run.",
     )
+    parser.add_argument(
+        "--split_scheme",
+        choices=["family", "murcko", "both"],
+        default="murcko",
+        help="Scaffold split to run. Use 'both' to run family and Murcko folds.",
+    )
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--kernel", type=int, nargs="+", default=list(range(1, 17)))
+    parser.add_argument(
+        "--dual_graph",
+        action="store_true",
+        default=USE_DUAL_GRAPH,
+        help="Use separate solute and solvent graphs.",
+    )
+    parser.add_argument(
+        "--dual_weight_mode",
+        choices=["shared", "separate"],
+        default=DEFAULT_DUAL_WEIGHT_MODE,
+        help="Weight sharing mode for --dual_graph: shared reuses one GPS stack, separate uses one stack per branch.",
+    )
     parser.add_argument("--num_layers", type=int, default=10)
     parser.add_argument("--dim_out", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.05)
@@ -157,6 +188,14 @@ def selected_tasks(args):
     return {task: task_configs[task] for task in tasks}
 
 
+def selected_split_schemes(args):
+    if args.split_scheme == "both":
+        keys = ["family", "murcko"]
+    else:
+        keys = [args.split_scheme]
+    return {key: SPLIT_SCHEMES[key] for key in keys}
+
+
 def source_fingerprint(path):
     digest = hashlib.sha1()
     with path.open("rb") as handle:
@@ -165,34 +204,37 @@ def source_fingerprint(path):
     return digest.hexdigest()[:10]
 
 
-def load_scaffold_table(path, source_target, target):
+def load_scaffold_table(path, source_target, target, split_column, scaffold_column):
     df = pd.read_csv(path)
-    required = {"smiles", "solvent", "tag_name", SCAFFOLD_COLUMN, SPLIT_COLUMN, source_target}
+    required = {"smiles", "solvent", "tag_name", scaffold_column, split_column, source_target}
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"{path} is missing columns: {missing}")
 
-    work = df[["smiles", "solvent", source_target, "tag_name", SCAFFOLD_COLUMN, SPLIT_COLUMN]].copy()
+    columns = list(
+        dict.fromkeys(["smiles", "solvent", source_target, "tag_name", scaffold_column, split_column])
+    )
+    work = df[columns].copy()
     work = work.rename(columns={source_target: target})
-    work["fold"] = pd.to_numeric(work[SPLIT_COLUMN], errors="coerce")
+    work["fold"] = pd.to_numeric(work[split_column], errors="coerce")
     work[target] = pd.to_numeric(work[target], errors="coerce")
     work = work.dropna(subset=["smiles", target, "fold"])
     work["fold"] = work["fold"].astype(int)
 
     positive_fold_df = work[work["fold"] >= 0]
-    scaffold_fold_counts = positive_fold_df.groupby(SCAFFOLD_COLUMN)["fold"].nunique()
+    scaffold_fold_counts = positive_fold_df.groupby(scaffold_column)["fold"].nunique()
     split_scaffolds = scaffold_fold_counts[scaffold_fold_counts > 1]
     if not split_scaffolds.empty:
         raise ValueError(
-            f"These {SCAFFOLD_COLUMN} values appear in multiple folds: "
+            f"These {scaffold_column} values appear in multiple folds: "
             + ", ".join(split_scaffolds.index.astype(str))
         )
     return work
 
 
-def write_fold_csvs(df, task, source_csv, fold, raw_dir):
+def write_fold_csvs(df, task, source_csv, fold, raw_dir, split_scheme):
     raw_dir.mkdir(parents=True, exist_ok=True)
-    prefix = f"{task}_scaffold_cv_{source_fingerprint(source_csv)}_fold{fold}"
+    prefix = f"{task}_{split_scheme}_cv_{source_fingerprint(source_csv)}_fold{fold}"
     train_path = raw_dir / f"{prefix}_train.csv"
     valid_path = raw_dir / f"{prefix}_valid.csv"
 
@@ -210,10 +252,10 @@ def write_fold_csvs(df, task, source_csv, fold, raw_dir):
     return train_path, valid_path, train_df, valid_df
 
 
-def processed_paths(root, csv_path, kernel, use_solvent=True):
+def processed_paths(root, csv_path, kernel, use_solvent=True, dual_graph=False):
     base_name = Path(csv_path).stem
     kernel_suffix = f"_k{len(kernel)}" if kernel is not None else ""
-    solvent_suffix = "" if use_solvent else "_nosolvent"
+    solvent_suffix = "_dual" if dual_graph else "" if use_solvent else "_nosolvent"
     processed_dir = Path(root) / "processed"
     return [
         processed_dir / f"{base_name}{kernel_suffix}{solvent_suffix}_processed.pt",
@@ -221,24 +263,25 @@ def processed_paths(root, csv_path, kernel, use_solvent=True):
     ]
 
 
-def require_preprocessed_cache(raw_dir, csv_paths, kernel):
+def require_preprocessed_cache(raw_dir, csv_paths, kernel, dual_graph=False):
     root = Path(raw_dir).parent
     missing = []
     for csv_path in csv_paths:
-        for cache_path in processed_paths(root, csv_path, kernel):
+        for cache_path in processed_paths(root, csv_path, kernel, dual_graph=dual_graph):
             if not cache_path.exists():
                 missing.append(cache_path)
     if missing:
         missing_preview = "\n".join(str(path) for path in missing[:8])
         extra = "" if len(missing) <= 8 else f"\n... and {len(missing) - 8} more"
+        dual_hint = " --dual_graph" if dual_graph else ""
         raise FileNotFoundError(
             "Missing processed scaffold CV cache files. Run "
-            "`python scripts/preprocess_scaffold_cv_data.py --task both` first.\n"
+            f"`python scripts/preprocess_scaffold_cv_data.py --task both --split_scheme <family|murcko|both>{dual_hint}` first.\n"
             f"{missing_preview}{extra}"
         )
 
 
-def summarize_split(task, fold, train_df, valid_df, source_df):
+def summarize_split(task, fold, train_df, valid_df, source_df, split_scheme, split_column, scaffold_column):
     heldout_tags = sorted(
         source_df.loc[source_df["fold"] == fold, "tag_name"].dropna().astype(str).unique()
     )
@@ -248,19 +291,32 @@ def summarize_split(task, fold, train_df, valid_df, source_df):
             "tag_name",
         ].dropna().astype(str).unique()
     )
+    heldout_scaffolds = source_df.loc[
+        source_df["fold"] == fold, scaffold_column
+    ].dropna().astype(str).unique()
+    train_scaffolds = source_df.loc[
+        (source_df["fold"] >= 0) & (source_df["fold"] != fold),
+        scaffold_column,
+    ].dropna().astype(str).unique()
     return {
         "task": task,
+        "split_scheme": split_scheme,
+        "split_column": split_column,
+        "scaffold_column": scaffold_column,
         "fold": fold,
         "train_size": len(train_df),
         "valid_size": len(valid_df),
         "train_tag_count": len(train_tags),
         "valid_tag_count": len(heldout_tags),
+        "train_scaffold_count": len(train_scaffolds),
+        "valid_scaffold_count": len(heldout_scaffolds),
         "valid_tag_names": ";".join(heldout_tags),
     }
 
 
-def run_fold(args, task, fold, train_csv, valid_csv):
-    from models.network import GPSModel
+def run_fold(args, task, fold, train_csv, valid_csv, split_scheme):
+    from data import DualFluorescenceDataset
+    from models.network import DualGraphGPSModel, GPSModel
     from train.trainer import create_loader, custom_train
     from utils import schedule_with_warmup
     from utils.simple_logger import create_simple_logger
@@ -269,8 +325,11 @@ def run_fold(args, task, fold, train_csv, valid_csv):
     run_seed = args.seed + fold
     set_seed(run_seed)
     device = resolve_device(args.device)
-    fold_log_dir = args.log_dir / task / f"fold_{fold}"
+    fold_log_dir = args.log_dir / split_scheme / task / f"fold_{fold}"
     fold_log_dir.mkdir(parents=True, exist_ok=True)
+    model_cls = DualGraphGPSModel if args.dual_graph else GPSModel
+    dataset_cls = DualFluorescenceDataset if args.dual_graph else None
+    follow_batch = ["solute_x", "solvent_x"] if args.dual_graph else None
 
     train_loader, val_loader, test_loader = create_loader(
         train_dataset_dir=str(train_csv),
@@ -280,9 +339,11 @@ def run_fold(args, task, fold, train_csv, valid_csv):
         num_workers=args.num_workers,
         kernel=args.kernel,
         dataset_root=args.raw_dir.parent,
+        **({"dataset_cls": dataset_cls} if dataset_cls is not None else {}),
+        follow_batch=follow_batch,
     )
 
-    model = GPSModel(
+    model = model_cls(
         dim_h=args.dim_hidden,
         num_heads=args.num_heads,
         dropout=args.dropout,
@@ -290,6 +351,7 @@ def run_fold(args, task, fold, train_csv, valid_csv):
         num_layers=args.num_layers,
         dim_out=args.dim_out,
         rwse_steps=args.kernel,
+        **({"dual_weight_mode": args.dual_weight_mode} if args.dual_graph else {}),
     ).to(device)
     loggers = create_simple_logger(output_dir=str(fold_log_dir))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -337,6 +399,7 @@ def run_gpu_worker(gpu_id, jobs):
             fold=job["fold"],
             train_csv=Path(job["train_csv"]),
             valid_csv=Path(job["valid_csv"]),
+            split_scheme=job["split_scheme"],
         )
         completed.append(
             {
@@ -392,51 +455,77 @@ def main():
     rows = []
     jobs = []
     worker_args = args_to_worker_dict(args)
-    for task, config in selected_tasks(args).items():
-        source_csv = Path(config["source_csv"]).resolve()
-        source_target = config["source_target"]
-        target = config["target"]
-        source_df = load_scaffold_table(source_csv, source_target, target)
+    split_schemes = selected_split_schemes(args)
+    for split_key, split_config in split_schemes.items():
+        split_name = split_config["name"]
+        split_column = split_config["split_column"]
+        scaffold_column = split_config["scaffold_column"]
 
-        for fold in args.folds:
-            train_csv, valid_csv, train_df, valid_df = write_fold_csvs(
-                source_df,
-                task=target,
-                source_csv=source_csv,
-                fold=fold,
-                raw_dir=args.raw_dir,
-            )
-            summary = summarize_split(target, fold, train_df, valid_df, source_df)
-            summary["train_csv"] = str(train_csv)
-            summary["valid_csv"] = str(valid_csv)
-            print(
-                f"[{target} fold {fold}] "
-                f"train={summary['train_size']} valid={summary['valid_size']} "
-                f"valid_tags={summary['valid_tag_names']}"
+        for task, config in selected_tasks(args).items():
+            source_csv = Path(config["source_csv"]).resolve()
+            source_target = config["source_target"]
+            target = config["target"]
+            source_df = load_scaffold_table(
+                source_csv,
+                source_target,
+                target,
+                split_column=split_column,
+                scaffold_column=scaffold_column,
             )
 
-            if not args.dry_run:
-                if args.require_preprocessed:
-                    require_preprocessed_cache(
-                        args.raw_dir,
-                        [train_csv, valid_csv],
-                        args.kernel,
-                    )
-                if args.gpus:
-                    jobs.append(
-                        {
-                            "index": len(rows),
-                            "args": worker_args,
-                            "task": target,
-                            "fold": fold,
-                            "train_csv": str(train_csv),
-                            "valid_csv": str(valid_csv),
-                        }
-                    )
-                else:
-                    result = run_fold(args, target, fold, train_csv, valid_csv)
-                    summary.update(result)
-            rows.append(summary)
+            for fold in args.folds:
+                train_csv, valid_csv, train_df, valid_df = write_fold_csvs(
+                    source_df,
+                    task=target,
+                    source_csv=source_csv,
+                    fold=fold,
+                    raw_dir=args.raw_dir,
+                    split_scheme=split_name,
+                )
+                summary = summarize_split(
+                    target,
+                    fold,
+                    train_df,
+                    valid_df,
+                    source_df,
+                    split_scheme=split_name,
+                    split_column=split_column,
+                    scaffold_column=scaffold_column,
+                )
+                summary["train_csv"] = str(train_csv)
+                summary["valid_csv"] = str(valid_csv)
+                summary["dual_graph"] = args.dual_graph
+                summary["dual_weight_mode"] = args.dual_weight_mode if args.dual_graph else ""
+                print(
+                    f"[{split_name} {target} fold {fold}] "
+                    f"train={summary['train_size']} valid={summary['valid_size']} "
+                    f"valid_tags={summary['valid_tag_names']}"
+                )
+
+                if not args.dry_run:
+                    if args.require_preprocessed:
+                        require_preprocessed_cache(
+                            args.raw_dir,
+                            [train_csv, valid_csv],
+                            args.kernel,
+                            dual_graph=args.dual_graph,
+                        )
+                    if args.gpus:
+                        jobs.append(
+                            {
+                                "index": len(rows),
+                                "args": worker_args,
+                                "task": target,
+                                "fold": fold,
+                                "split_scheme": split_name,
+                                "train_csv": str(train_csv),
+                                "valid_csv": str(valid_csv),
+                            }
+                        )
+                    else:
+                        result = run_fold(args, target, fold, train_csv, valid_csv, split_name)
+                        summary.update(result)
+                rows.append(summary)
 
     if jobs:
         results_by_index = run_parallel_jobs(jobs, args.gpus)
@@ -448,6 +537,18 @@ def main():
     pd.DataFrame(rows).to_csv(summary_path, index=False)
     metadata_path = args.log_dir / "scaffold_cv_metadata.json"
     metadata = {
+        "model_name": MODEL_NAME,
+        "dual_graph": args.dual_graph,
+        "dual_weight_mode": args.dual_weight_mode if args.dual_graph else None,
+        "split_scheme": args.split_scheme,
+        "split_schemes": {
+            key: {
+                "name": value["name"],
+                "split_column": value["split_column"],
+                "scaffold_column": value["scaffold_column"],
+            }
+            for key, value in split_schemes.items()
+        },
         "task": args.task,
         "folds": args.folds,
         "gpus": args.gpus,

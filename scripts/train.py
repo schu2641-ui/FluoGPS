@@ -18,10 +18,10 @@ PROPERTY_GROUPS = {
     },
     2: {
         "properties": ["plqy", "e"],
-        "dropout": 0.05,
-        "attn_dropout": 0.1,
+        "dropout": 0.0,
+        "attn_dropout": 0.2,
         "lr": 0.001,
-        "max_epoch": 300,
+        "max_epoch": 500,
     },
 }
 
@@ -35,21 +35,18 @@ def parse_args():
         default=None,
         help="Properties to train. Overrides --property_group when set.",
     )
-    parser.add_argument("--train_csv", type=str, default=str(DEFAULT_DATA_DIR / "abs_train.csv"), help="Training CSV.")
-    parser.add_argument("--val_csv", type=str, default=str(DEFAULT_DATA_DIR / "abs_valid.csv"), help="Validation CSV.")
-    parser.add_argument("--test_csv", type=str, default=str(DEFAULT_DATA_DIR / "abs_test.csv"), help="Test CSV.")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size.")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader worker count.")
     parser.add_argument("--kernel", type=int, nargs="+", default=list(range(1, 17)), help="RWSE steps.")
     parser.add_argument("--num_layers", type=int, default=10, help="Number of GPS layers.")
     parser.add_argument("--dim_out", type=int, default=1, help="Output dimension.")
     parser.add_argument("--dropout", type=float, default=None, help="Override group dropout rate.")
     parser.add_argument("--attn_dropout", type=float, default=None, help="Override group attention dropout rate.")
-    parser.add_argument("--dim_hidden", type=int, default=128, help="Hidden dimension.")
+    parser.add_argument("--dim_hidden", type=int, default=64, help="Hidden dimension.")
     parser.add_argument("--num_heads", type=int, default=4, help="Attention head count.")
     parser.add_argument("--lr", type=float, default=None, help="Override group learning rate.")
-    parser.add_argument("--warm_steps", type=float, default=15, help="Warmup steps.")
-    parser.add_argument("--weight_decay", type=float, default=0, help="Weight decay.")
+    parser.add_argument("--warm_steps", type=float, default=25, help="Warmup steps.")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay.")
     parser.add_argument("--max_epoch", type=int, default=None, help="Override group maximum training epochs.")
     parser.add_argument("--device", type=str, default="cuda", help="Device name.")
     parser.add_argument("--log_dir", type=str, default=str(DEFAULT_LOG_DIR), help="Base output directory.")

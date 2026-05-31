@@ -20,6 +20,8 @@ def create_loader(
     kernel=None,
     use_solvent=True,
     dataset_root=None,
+    dataset_cls=FluorescenceDataset,
+    follow_batch=None,
 ):
     kernel = normalize_kernel(kernel)
     pre_transform = create_rwse_transform(kernel=kernel)
@@ -28,7 +30,7 @@ def create_loader(
     y_mean, y_std = compute_normalization_params(train_dataset_dir)
     print()
 
-    train_dataset = FluorescenceDataset(
+    train_dataset = dataset_cls(
         csv_file=train_dataset_dir,
         root=str(dataset_root) if dataset_root is not None else "datasets/fluorescence",
         kernel=kernel,
@@ -39,7 +41,7 @@ def create_loader(
     )
 
     print("\nLoading validation dataset...")
-    val_dataset = FluorescenceDataset(
+    val_dataset = dataset_cls(
         csv_file=val_dataset_dir,
         root=str(dataset_root) if dataset_root is not None else "datasets/fluorescence",
         kernel=kernel,
@@ -50,7 +52,7 @@ def create_loader(
     )
 
     print("\nLoading test dataset...")
-    test_dataset = FluorescenceDataset(
+    test_dataset = dataset_cls(
         csv_file=test_dataset_dir,
         root=str(dataset_root) if dataset_root is not None else "datasets/fluorescence",
         kernel=kernel,
@@ -65,6 +67,8 @@ def create_loader(
         "num_workers": num_workers,
         "pin_memory": torch.cuda.is_available(),
     }
+    if follow_batch is not None:
+        loader_kwargs["follow_batch"] = list(follow_batch)
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
     test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
@@ -78,7 +82,7 @@ def custom_train(model, loaders, loggers, optimizer, scheduler, max_epoch):
     best_val_loss = float("inf")
     best_val_mae = float("inf")
     patience_counter = 0
-    patience = 50
+    patience = 100
     test_start_epoch = int(max_epoch * 0.8)
     checkpoint_path = os.path.join(loggers[0].tb_writer.log_dir, "best_model.pt")
 

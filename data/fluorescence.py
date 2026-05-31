@@ -55,6 +55,15 @@ def compute_normalization_params(csv_path):
     return y_mean, y_std
 
 
+class DualGraphData(Data):
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "solute_edge_index":
+            return self.solute_x.size(0)
+        if key == "solvent_edge_index":
+            return self.solvent_x.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
+
+
 class FluorescenceDataset(InMemoryDataset):
     def __init__(
         self,
@@ -183,6 +192,83 @@ class FluorescenceDataset(InMemoryDataset):
             y = torch.tensor([normalized_label], dtype=torch.float)
 
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, num_nodes=num_nodes, role=role)
+            data_list.append(data)
+
+        if self.pre_filter is not None:
+            data_list = [data for data in data_list if self.pre_filter(data)]
+
+        if self.pre_transform is not None:
+            data_list = [self.pre_transform(data) for data in data_list]
+
+        data, slices = self.collate(data_list)
+        torch.save((data, slices), self.processed_paths[0])
+
+
+class DualFluorescenceDataset(FluorescenceDataset):
+    @property
+    def processed_file_names(self):
+        base_name = Path(self.csv_file).stem
+        kernel_suffix = f"_k{len(self.kernel)}" if self.kernel is not None else ""
+        return [
+            f"{base_name}{kernel_suffix}_dual_processed.pt",
+            f"{base_name}{kernel_suffix}_dual_norm_params.pt",
+        ]
+
+    def process(self):
+        df = pd.read_csv(self.raw_paths[0])
+        smiles_col = "smiles"
+        target_col = infer_target_column(self.csv_file)
+        solvent_col = "solvent"
+        data_list = []
+        print(f"Processing dual graphs '{self.csv_file}'...")
+
+        y_mean = self.provided_y_mean
+        y_std = self.provided_y_std
+        if y_mean is not None and y_std is not None:
+            print(f"  → Using provided normalization: mean={y_mean:.4f}, std={y_std:.4f}")
+        else:
+            print("  → Computing normalization from this dataset...")
+            all_labels = transform_target_series(df[target_col], target_col).dropna().to_list()
+            all_labels = torch.tensor(all_labels, dtype=torch.float)
+            y_mean = all_labels.mean().item()
+            y_std = all_labels.std().item()
+            if y_std == 0:
+                y_std = 1.0
+            if target_col == "e":
+                print("  → target transform: log10(e)")
+            print(f"  → Computed normalization: mean={y_mean:.4f}, std={y_std:.4f}")
+
+        torch.save((y_mean, y_std), self.processed_paths[1])
+
+        for _, row in tqdm(df.iterrows(), total=df.shape[0]):
+            smiles = row[smiles_col]
+            solvent = row[solvent_col] if solvent_col in df.columns else None
+            label = transform_target_value(row[target_col], target_col)
+            if label is None:
+                print(f"Skipping missing label for SMILES: {smiles}")
+                continue
+            if pd.isna(solvent) or str(solvent).strip() == "":
+                print(f"Skipping missing solvent for SMILES: {smiles}")
+                continue
+
+            try:
+                solute_graph = smiles2graph(smiles)
+                solvent_graph = smiles2graph(solvent)
+            except Exception:
+                print(f"Skipping invalid SMILES pair: {smiles} / {solvent}")
+                continue
+
+            normalized_label = (label - y_mean) / y_std
+            y = torch.tensor([normalized_label], dtype=torch.float)
+            data = DualGraphData(
+                solute_x=torch.from_numpy(solute_graph["node_feat"]).to(torch.long),
+                solute_edge_index=torch.from_numpy(solute_graph["edge_index"]).to(torch.long),
+                solute_edge_attr=torch.from_numpy(solute_graph["edge_feat"]).to(torch.long),
+                solvent_x=torch.from_numpy(solvent_graph["node_feat"]).to(torch.long),
+                solvent_edge_index=torch.from_numpy(solvent_graph["edge_index"]).to(torch.long),
+                solvent_edge_attr=torch.from_numpy(solvent_graph["edge_feat"]).to(torch.long),
+                y=y,
+            )
             data_list.append(data)
 
         if self.pre_filter is not None:

@@ -61,3 +61,28 @@ class SANGraphHead(nn.Module):
         batch.graph_feature = graph_emb
         pred, label = self._apply_index(batch)
         return pred, label
+
+
+class SANDualGraphHead(nn.Module):
+    def __init__(self, dim_in, dim_out, L=2):
+        super().__init__()
+        mean_pooling_dim = dim_in * 2
+        list_FC_layers = [
+            nn.Linear(mean_pooling_dim // 2 ** l,
+                      mean_pooling_dim // 2 ** (l + 1),
+                      bias=True)
+            for l in range(L)]
+        list_FC_layers.append(
+            nn.Linear(mean_pooling_dim // 2 ** L, dim_out, bias=True))
+        self.FC_layers = nn.ModuleList(list_FC_layers)
+        self.L = L
+        self.activation = nn.ReLU()
+
+    def forward(self, solute_emb, solvent_emb, y):
+        graph_emb = torch.cat([solute_emb, solvent_emb], dim=-1)
+
+        for l in range(self.L):
+            graph_emb = self.FC_layers[l](graph_emb)
+            graph_emb = self.activation(graph_emb)
+        graph_emb = self.FC_layers[self.L](graph_emb)
+        return graph_emb, y

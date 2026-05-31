@@ -22,7 +22,8 @@ class GPSLayer(nn.Module):
                 batch_norm=True,
                 log_attn_weights=False,
                 use_local=True,
-                use_global=True):
+                use_global=True,
+                block_cross_role_attention=False):
         super().__init__()
 
         self.dim_h = dim_h
@@ -34,6 +35,7 @@ class GPSLayer(nn.Module):
         self.activation = nn.ReLU
         self.use_local = use_local
         self.use_global = use_global
+        self.block_cross_role_attention = block_cross_role_attention
 
         self.log_attn_weights = log_attn_weights
 
@@ -102,7 +104,10 @@ class GPSLayer(nn.Module):
         # Multi-head attention.
         if self.self_attn is not None and self.use_global:
             h_dense, mask = to_dense_batch(h, batch.batch)
-            h_attn = self._sa_block(h_dense, None, ~mask)[mask]
+            attn_mask = None
+            if self.block_cross_role_attention:
+                attn_mask = self._build_role_attention_mask(batch.role, batch.batch)
+            h_attn = self._sa_block(h_dense, attn_mask, ~mask)[mask]
             h_attn = self.dropout_attn(h_attn)
             h_attn = h_in1 + h_attn  # Residual connection.
             if self.layer_norm:
@@ -123,6 +128,15 @@ class GPSLayer(nn.Module):
 
         batch.x = h
         return batch
+
+    def _build_role_attention_mask(self, role, batch_index):
+        role_dense, _ = to_dense_batch(role, batch_index)
+        cross_role = role_dense.unsqueeze(2) != role_dense.unsqueeze(1)
+        return (
+            cross_role.unsqueeze(1)
+            .expand(-1, self.num_heads, -1, -1)
+            .reshape(-1, cross_role.size(1), cross_role.size(2))
+        )
 
     def _sa_block(self, x, attn_mask, key_padding_mask):
         """Self-attention block.
@@ -150,4 +164,4 @@ class GPSLayer(nn.Module):
         return self.ff_dropout2(self.ff_linear2(x))
 
     def extra_repr(self):
-        return f'dim_h={self.dim_h}, heads={self.num_heads}, local=GatedGCN({"on" if self.use_local else "off"}), global=Transformer({"on" if self.use_global else "off"})'
+        return f'dim_h={self.dim_h}, heads={self.num_heads}, local=GatedGCN({"on" if self.use_local else "off"}), global=Transformer({"on" if self.use_global else "off"}), role_block={"on" if self.block_cross_role_attention else "off"}'
